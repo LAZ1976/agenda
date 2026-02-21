@@ -1,0 +1,12 @@
+{
+    "crons": [
+        {
+            "path": "/api/cron/relatorio-futuro",
+            "schedule": "0 18 * * 5"
+        },
+        {
+            "path": "/api/cron/relatorio-passado",
+            "schedule": "0 8 * * 1"
+        }
+    ]
+}

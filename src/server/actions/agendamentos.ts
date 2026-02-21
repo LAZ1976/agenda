@@ -1,0 +1,127 @@
+"use server";
+
+import { db } from "@/db";
+import { agendamentos, usuariosInfo } from "@/db/schema";
+import { eq, desc } from "drizzle-orm";
+import { auth } from "@clerk/nextjs/server";
+import { z } from "zod";
+import { revalidatePath } from "next/cache";
+
+const agendamentoSchema = z.object({
+    dataHora: z.date(),
+    motivo: z.enum(["Promoção", "Extravio", "Dano"]),
+    porIntermedioServico: z.boolean(),
+});
+
+export async function criarAgendamento(data: z.infer<typeof agendamentoSchema>) {
+    try {
+        const { userId } = await auth();
+        if (!userId) return { success: false, message: "Não autorizado" };
+
+        const parsed = agendamentoSchema.safeParse(data);
+        if (!parsed.success) return { success: false, message: "Dados inválidos" };
+
+        const { dataHora, motivo, porIntermedioServico } = parsed.data;
+        const protocolo = crypto.randomUUID().slice(0, 8).toUpperCase();
+
+        await db.insert(agendamentos).values({
+            id: protocolo,
+            solicitanteId: userId,
+            dataHora,
+            motivo,
+            porIntermedioServico,
+            status: "Agendado",
+            createdAt: new Date(),
+        });
+
+        revalidatePath("/dashboard/agenda");
+        return { success: true, protocolo, message: "Agendamento confirmado!" };
+    } catch (error) {
+        console.error(error);
+        return { success: false, message: "Erro ao criar agendamento" };
+    }
+}
+
+export async function cancelarAgendamento(agendamentoId: string) {
+    try {
+        const { userId } = await auth();
+        if (!userId) return { success: false, message: "Não autorizado" };
+
+        // Busca o agendamento para verificar dono
+        const agendamento = await db
+            .select()
+            .from(agendamentos)
+            .where(eq(agendamentos.id, agendamentoId))
+            .get();
+
+        if (!agendamento) return { success: false, message: "Agendamento não encontrado" };
+        if (agendamento.solicitanteId !== userId) return { success: false, message: "Sem permissão" };
+        if (agendamento.status !== "Agendado") return { success: false, message: "Só é possível cancelar agendamentos com status 'Agendado'" };
+
+        await db
+            .update(agendamentos)
+            .set({ status: "Cancelado" })
+            .where(eq(agendamentos.id, agendamentoId));
+
+        revalidatePath("/dashboard/agenda");
+        return { success: true, message: "Agendamento cancelado com sucesso" };
+    } catch (error) {
+        console.error(error);
+        return { success: false, message: "Erro ao cancelar agendamento" };
+    }
+}
+
+export type AgendamentoComPerfil = {
+    id: string;
+    dataHora: Date;
+    motivo: string;
+    status: string;
+    porIntermedioServico: boolean;
+    solicitanteId: string;
+    postoGraduacao: string | null;
+    nomeGuerra: string | null;
+};
+
+export async function getAgendamentos(): Promise<AgendamentoComPerfil[]> {
+    try {
+        const { userId } = await auth();
+        if (!userId) return [];
+
+        const usuarioLogado = await db
+            .select()
+            .from(usuariosInfo)
+            .where(eq(usuariosInfo.id, userId))
+            .get();
+
+        if (!usuarioLogado) return [];
+
+        // Busca agendamentos com JOIN nas infos do usuário
+        const isAdmin = usuarioLogado.role !== "user";
+
+        const rows = await db
+            .select({
+                id: agendamentos.id,
+                dataHora: agendamentos.dataHora,
+                motivo: agendamentos.motivo,
+                status: agendamentos.status,
+                porIntermedioServico: agendamentos.porIntermedioServico,
+                solicitanteId: agendamentos.solicitanteId,
+                postoGraduacao: usuariosInfo.postoGraduacao,
+                nomeGuerra: usuariosInfo.nomeGuerra,
+            })
+            .from(agendamentos)
+            .leftJoin(usuariosInfo, eq(agendamentos.solicitanteId, usuariosInfo.id))
+            .orderBy(desc(agendamentos.dataHora))
+            .all();
+
+        // Filtro por usuário se não for admin
+        if (!isAdmin) {
+            return rows.filter((r) => r.solicitanteId === userId);
+        }
+
+        return rows;
+    } catch (error) {
+        console.error(error);
+        return [];
+    }
+}
