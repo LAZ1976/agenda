@@ -6,21 +6,40 @@ import { eq, and, gte, lt, or } from "drizzle-orm";
 
 /**
  * Retorna os slots de 30 minutos disponíveis para uma determinada data.
- * Regras: Seg-Sex, 08:30-12:00 e 14:00-18:00.
+ * Regras: Seg-Sex, 08:30-12:00 e 14:00-18:00 (Horário de Brasília - BRT = UTC-3).
  */
 export async function getHorariosDisponiveis(dataConsulta: Date) {
-    // 1. Gera todos os slots possíveis para o dia
-    const slotsPeriodoManha = gerarSlots(dataConsulta, 8, 30, 12, 0);
-    const slotsPeriodoTarde = gerarSlots(dataConsulta, 14, 0, 18, 0);
-    const todosSlots = [...slotsPeriodoManha, ...slotsPeriodoTarde];
+    // Verifica se o dia é final de semana (0 = Domingo, 6 = Sábado)
+    const diaSemana = dataConsulta.getDay();
+    if (diaSemana === 0 || diaSemana === 6) {
+        return []; // Sem horários nos fins de semana
+    }
 
-    // 2. Busca agendamentos já existentes neste dia no Banco
-    const inicioDia = new Date(dataConsulta);
-    inicioDia.setHours(0, 0, 0, 0);
+    // Cria os slots usando o horário de Brasília (UTC-3)
+    // Para garantir que os horários ficam corretos independente do servidor,
+    // usamos o offset BRT (-3h = -180 min) explicitamente.
+    const BRT_OFFSET_MINUTES = -3 * 60;
 
-    const fimDia = new Date(dataConsulta);
-    fimDia.setHours(23, 59, 59, 999);
+    function criarSlotBRT(hora: number, minuto: number): Date {
+        const d = new Date(dataConsulta);
+        // Remove a parte de hora/min/seg e ajusta para meia-noite UTC
+        d.setUTCHours(0, 0, 0, 0);
+        // Adiciona as horas e minutos de Brasília convertidos para UTC
+        const totalMinutosUTC = hora * 60 + minuto - BRT_OFFSET_MINUTES;
+        d.setUTCMinutes(totalMinutosUTC);
+        return d;
+    }
 
+    // 1. Gera todos os slots possíveis para o dia em BRT
+    const slotsManha = gerarSlotsBRT(dataConsulta, 8, 30, 12, 0, BRT_OFFSET_MINUTES);
+    const slotsTarde = gerarSlotsBRT(dataConsulta, 14, 0, 18, 0, BRT_OFFSET_MINUTES);
+    const todosSlots = [...slotsManha, ...slotsTarde];
+
+    // 2. Define o início e fim do dia em BRT para usar nas queries
+    const inicioDia = criarSlotBRT(0, 0);   // Meia-noite BRT
+    const fimDia = criarSlotBRT(23, 59);     // Final do dia BRT
+
+    // 3. Busca agendamentos já existentes neste dia no Banco
     const agendados = await db
         .select({ dataHora: agendamentos.dataHora })
         .from(agendamentos)
@@ -36,7 +55,7 @@ export async function getHorariosDisponiveis(dataConsulta: Date) {
         agendados.map((a) => new Date(a.dataHora).getTime())
     );
 
-    // 3. Buscar Bloqueios Administrativos do dia
+    // 4. Buscar Bloqueios Administrativos do dia
     const bloqueiosDia = await db
         .select({ inicio: bloqueios.inicio, fim: bloqueios.fim })
         .from(bloqueios)
@@ -49,12 +68,10 @@ export async function getHorariosDisponiveis(dataConsulta: Date) {
         )
         .all();
 
-    // 4. Filtra os slots removendo os que já estão no banco
+    // 5. Filtra os slots removendo os que já estão no banco ou bloqueados
     return todosSlots.filter((slot) => {
-        // Se já está reservado num agendamento
         if (horariosOcupados.has(slot.getTime())) return false;
 
-        // Se cai num período de bloqueio do admin
         for (const blq of bloqueiosDia) {
             const slotTime = slot.getTime();
             if (slotTime >= new Date(blq.inicio).getTime() && slotTime < new Date(blq.fim).getTime()) {
@@ -67,25 +84,26 @@ export async function getHorariosDisponiveis(dataConsulta: Date) {
 }
 
 /**
- * Função utilitária para gerar intervalos de 30min em um período.
+ * Gera slots de 30 minutos em horário de Brasília (BRT).
  */
-function gerarSlots(
+function gerarSlotsBRT(
     dataBase: Date,
     horaInicio: number,
     minutoInicio: number,
     horaFim: number,
-    minutoFim: number
+    minutoFim: number,
+    brtOffsetMinutes: number
 ): Date[] {
     const slots: Date[] = [];
-    const atual = new Date(dataBase);
-    atual.setHours(horaInicio, minutoInicio, 0, 0);
 
-    const fim = new Date(dataBase);
-    fim.setHours(horaFim, minutoFim, 0, 0);
+    const totalInicio = horaInicio * 60 + minutoInicio;
+    const totalFim = horaFim * 60 + minutoFim;
 
-    while (atual < fim) {
-        slots.push(new Date(atual));
-        atual.setMinutes(atual.getMinutes() + 30);
+    for (let m = totalInicio; m < totalFim; m += 30) {
+        const d = new Date(dataBase);
+        d.setUTCHours(0, 0, 0, 0);
+        d.setUTCMinutes(m - brtOffsetMinutes);
+        slots.push(d);
     }
 
     return slots;
